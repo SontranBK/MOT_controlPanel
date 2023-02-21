@@ -1,61 +1,45 @@
-import math
+from ui import Ui_App
+from dashboardUI import UI_Dashboard
 import os
 import sys
-import threading
-from datetime import datetime
-import numpy as np
-from PyQt5.QtCore import QUrl, QPoint, QRect
-from PyQt5 import QtGui, QtCore
-from PyQt5.QtGui import QImage, QPen, QColor, QPixmap
-from numpy import ma
-import csv
-from user_interface import Ui_MainWindow
-from PyQt5.QtWidgets import QWidget, QApplication, QFileDialog, QLabel, QMainWindow, QTableWidgetItem
-#from moviepy.editor import *
-
+from PyQt5.QtWidgets import QWidget, QApplication, QFileDialog, QLabel, QMainWindow, QTableWidgetItem,QPushButton,QListWidgetItem
+from PyQt5 import QtCore, QtGui, QtWidgets,QtSql
+from PyQt5 import QtWidgets, uic, QtCore
+from PyQt5.QtCore import QFile,QTextStream,QSize,QEvent,QPoint,QRect
+from PyQt5.QtGui import QColor,QImage, QPen
+from threading import Thread
 import cv2
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import auth
+from firebase_admin import firestore
+import pyrebase
 import queue
 from collections import deque
-import firebase_admin
-
-#firebase 
-from firebase_admin import credentials
-from firebase_admin import firestore
-cred = credentials.Certificate("serviceAccountKey.json")
+cred = credentials.Certificate("firebaseAccount.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 
-#from Detection.yolox.detect import YoloX
-#from Tracking.bytetrack import BYTETracker
-#from Detection.yolox.utils.visualize import _COLORS
+Config = {
+  'apiKey': "AIzaSyAGEyO4ZN7gdrvuqY4Vd1SMMCUVmt6UDno",
+  'authDomain': "aaaa-dbb41.firebaseapp.com",
+  'databaseURL': "https://aaaa-dbb41-default-rtdb.firebaseio.com",
+  "projectId": "aaaa-dbb41",
+  "storageBucket": "aaaa-dbb41.appspot.com",
+  "messagingSenderId": "91945409393",
+  "appId": "1:91945409393:web:1b17b16a8ad8d978bb74d0"
+}
 
-ROOT_DIR = os.path.abspath(os.curdir)#address of file
-ICON_PATH = os.path.join(ROOT_DIR, 'static/icon.png')# add img to the folder including file
-#detector = YoloX()
-#tracker = BYTETracker(track_thresh=0.5, track_buffer=30,
-#                      match_thresh=0.8, min_box_area=10, frame_rate=30)
-# coding: utf-8 
-
-q = queue.Queue()
-pts = deque(maxlen=64)
+firebase = pyrebase.initialize_app(Config)
+store = firebase.storage()
 qp = QtGui.QPainter()
-boundaries = [[((0, 110, 95), (20, 255, 255))],  # Red
-              [((20, 90, 60), (50, 200, 200))],  # Yellow
-              [((80, 90, 110), (90, 150, 255))]]  # Green
-
 global rect
 global lane_left, lane_center, lane_right
 global direct_left, direct_center, direct_right
-global vertical
-
-
-BLOW_THE_X_SIGN = 'green'
-WRONG_LANE_X_SIGN = 'green'
-
-
-def getFrame(video_dir, myFrameNumber):
-    cap = cv2.VideoCapture(video_dir)#video_dir is video file or webcam
+# get frame preview camera
+def getFrame(linkcam, myFrameNumber):
+    cap = cv2.VideoCapture(linkcam)#video_dir is video file or webcam
     cap.set(cv2.CAP_PROP_POS_FRAMES, myFrameNumber)
     cap.grab()
     return cap.retrieve(0)
@@ -70,138 +54,56 @@ def QtImage(screen, img):
     bytesPerLine = 3 * width
     return QImage(img.data, width, height, bytesPerLine, QImage.Format_RGB888)
 
+class VideoStreamWidget(object):
+    def __init__(self, src=0):
+        # Create a VideoCapture object
+        self.capture = cv2.VideoCapture(src)
 
-def Detect(det, frame):
-    box_detects = det.detect(frame.copy())[0]
-    classes = det.detect(frame.copy())[1]
-    confs = det.detect(frame.copy())[2]
-    return np.array(box_detects).astype(int), np.array(confs), np.array(classes)
+        # Start the thread to read frames from the video stream
+        self.thread = Thread(target=self.update, args=())
+        self.thread.daemon = True
+        self.thread.start()
+    def update(self):
+        # Read the next frame from the stream in a different thread
+        while True:
+            if self.capture.isOpened():
+                (self.status, self.frame) = self.capture.read()
+    def show_frame(self):
+        # Display frames in main program
+        if self.status:
+            self.frame = self.maintain_aspect_ratio_resize(self.frame, width=800)
+            cv2.imshow('IP Camera Video preview', self.frame)
 
+        # Press Q on keyboard to stop recording
+        key = cv2.waitKey(1)
+        if key == ord('q'):
+            self.capture.release()
+            cv2.destroyAllWindows()
+            exit(1)
 
-def Average(lst):
-    return sum(lst) / len(lst)
+    # Resizes a image and maintains aspect ratio
+    def maintain_aspect_ratio_resize(self, image, width=None, height=None, inter=cv2.INTER_AREA):
+        # Grab the image size and initialize dimensions
+        dim = None
+        (h, w) = image.shape[:2]
 
+        # Return original image if no need to resize
+        if width is None and height is None:
+            return image
 
-def colorDetector(frame, _rect):
-    num_rect = len(_rect)
-    color_sum = [0, 0, 0]
-    color = []
-    for j in range(num_rect):
-        a = rect[0][0].y()
-        b = rect[0][0].x()
-        c = rect[0][1].y()
-        d = rect[0][1].x()
-        traffic_light = frame[a:c, b:d]
-        traffic_light = cv2.GaussianBlur(traffic_light, (5, 5), 0)
-        hsv = cv2.cvtColor(traffic_light, cv2.COLOR_BGR2HSV)
-        for i in range(len(boundaries)):
-            for (lower, upper) in boundaries[i]:
-                mask = cv2.inRange(hsv, lower, upper)
-                color_sum[i] = ma.sum(mask)
-        color.append(color_sum.index(np.max(color_sum)))
-    color_lb = None
-    if len(color) > 0:
-        average = Average(color)
-        if average == 2:
-            color_lb = 'green'
-        elif average == 0:
-            color_lb = 'red'
+        # We are resizing height if width is none
+        if width is None:
+            # Calculate the ratio of the height and construct the dimensions
+            r = height / float(h)
+            dim = (int(w * r), height)
+        # We are resizing width if height is none
         else:
-            color_lb = 'yellow'
-    return color_lb
+            # Calculate the ratio of the 0idth and construct the dimensions
+            r = width / float(w)
+            dim = (width, int(h * r))
 
-# for Home
-class CameraView(QWidget):
-    def __init__(self, parent=None):
-        super(CameraView, self).__init__(parent)
-        self.image = None
-        global rect
-        global lane_left, lane_center, lane_right
-        global direct_left, direct_center, direct_right
-
-    def setImage(self, image):
-        self.image = image
-        img_size = image.size()
-        self.setMinimumSize(img_size)
-        self.update()
-
-    def paintEvent(self, event):
-        qp.begin(self)
-        if self.image:
-            qp.drawImage(QPoint(0, 0), self.image)
-        br = QtGui.QBrush(QColor(0, 252, 156, 40))
-        qp.setBrush(br)
-
-        for item in rect:
-            pen = QPen(QColor(255, 255, 255), 2, QtCore.Qt.SolidLine)
-            qp.setPen(pen)
-            qp.drawRect(QRect(item[0], item[1]))
-
-        for item in lane_left:
-            pen = QtGui.QPen(QColor(255, 0, 0), 2, QtCore.Qt.SolidLine)
-            qp.setPen(pen)
-            qp.drawLine(item[0], item[1])
-            qp.drawText(item[0], str("line left 1"))
-            
-        for item in lane_center:
-            pen = QtGui.QPen(QColor(255, 255, 0), 2, QtCore.Qt.SolidLine)
-            qp.setPen(pen)
-            qp.drawLine(item[0], item[1])
-            qp.drawText(item[0], str("line center 1"))
-        for item in lane_right:
-            pen = QtGui.QPen(QColor(0, 0, 255), 2, QtCore.Qt.SolidLine)
-            qp.setPen(pen)
-            qp.drawLine(item[0], item[1])
-            qp.drawText(item[0], str("line right 1"))
-
-        for item in direct_left:
-            #QColor(255,0,0) Red 
-            pen = QtGui.QPen(QColor(255, 0, 0), 2, QtCore.Qt.SolidLine)
-            qp.setPen(pen)
-            qp.drawLine(item[0], item[1])
-            qp.drawText(item[0], str("line left 2"))
-        for item in direct_center:
-            #QColor(255,255,0) yellow
-            pen = QtGui.QPen(QColor(255, 255, 0), 2, QtCore.Qt.SolidLine)
-            qp.setPen(pen)
-            qp.drawLine(item[0], item[1])
-            qp.drawText(item[0], str("line center 2"))
-        for item in direct_right:
-            #QColor(0,0,255) blue
-            pen = QtGui.QPen(QColor(0, 0, 255), 2, QtCore.Qt.SolidLine)
-            qp.setPen(pen)
-            qp.drawLine(item[0], item[1])
-            qp.drawText(item[0], str("line right 2"))
-        qp.end()
-
-
-class ExportView(QWidget):
-    def __init__(self, parent=None):
-        super(ExportView, self).__init__(parent)
-        self.image = None
-
-    def setImage(self, image):
-        self.image = image
-        img_size = image.size()
-        self.setMinimumSize(img_size)
-        self.update()
-
-    def paintEvent(self, event):
-        qp.begin(self)
-        if self.image:
-            qp.drawImage(QPoint(0, 0), self.image)
-        qp.end()
-
-
-def ccw(A, B, C):
-    return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
-
-
-def intersect(A, B, C, D):
-    return ccw(A, C, D) != ccw(B, C, D) and ccw(A, B, C) != ccw(A, B, D)
-
-
-# for Tab Draw -->
+        # Return the resized image
+        return cv2.resize(image, dim, interpolation=inter)
 class DrawObject(QWidget):
     def __init__(self, parent=None):
         super(DrawObject, self).__init__(parent)
@@ -254,10 +156,13 @@ class DrawObject(QWidget):
             qp.drawImage(QPoint(0, 0), self.image)
         br = QtGui.QBrush(QColor(0, 252, 156, 40))
         qp.setBrush(br)
+        global rect_redlight
         for item in rect:
             pen = QtGui.QPen(QColor(255, 255, 255), 2, QtCore.Qt.SolidLine)
             qp.setPen(pen)
             qp.drawRect(QRect(item[0], item[1]))
+            rect_redlight = item
+
         global line_left1,line_left2,line_center1,line_center2,line_right1,line_right2
         for item in lane_left:
             pen = QtGui.QPen(QColor(255, 0, 0), 2, QtCore.Qt.SolidLine)
@@ -265,89 +170,42 @@ class DrawObject(QWidget):
             qp.drawLine(item[0], item[1])
             qp.drawText(item[0], str("line left 1"))
             line_left1=item
-            # item[0].x() int
-            # data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # db.collection('point').document('point_left 1').set(data)
-        # for item in direct_left:
-        # #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-        #     if(item != None):
-        #         data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-        #         db.collection(name_adrress).document('point_left 1').set(data)
-        #         break
+         
         for item in lane_center:
             pen = QtGui.QPen(QColor(255, 255, 0), 2, QtCore.Qt.SolidLine)
             qp.setPen(pen)
             qp.drawLine(item[0], item[1])
             qp.drawText(item[0], str("line center 1"))
             line_center1=item
-            # data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # db.collection('point').document('point_center 1').set(data)
-        # for item in direct_center:
-        #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # if(item != None):
-            #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            #     db.collection(name_adrress).document('point_center 1').set(data)
-            #     break
+        
         for item in lane_right:
             pen = QtGui.QPen(QColor(0, 0, 255), 2, QtCore.Qt.SolidLine)
             qp.setPen(pen)
             qp.drawLine(item[0], item[1])
             qp.drawText(item[0], str("line right 1"))
             line_right1=item
-            # data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # db.collection('point').document('point_right 1').set(data)
-        # for item in direct_right:
-        #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # if(item != None):
-            #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            #     db.collection(name_adrress).document('point_right 1').set(data)
-            #     break
+
         for item in direct_left:
             pen = QtGui.QPen(QColor(255, 0, 0), 2, QtCore.Qt.SolidLine)
             qp.setPen(pen)
             qp.drawLine(item[0], item[1])
             qp.drawText(item[0], str("line left 2"))
             line_left2=item
-            # data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # db.collection('point').document('point_left 2').set(data)
-        # for item in direct_left:
-        #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # if(item != None):
-            #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            #     db.collection(name_adrress).document('point_left 2').set(data)
-            #     break    
+
         for item in direct_center:
             pen = QtGui.QPen(QColor(255, 255, 0), 2, QtCore.Qt.SolidLine)
             qp.setPen(pen)
             qp.drawLine(item[0], item[1])
             qp.drawText(item[0], str("center line 2"))
             line_center2=item
-            # data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            # db.collection('point').document('point_center 2').set(data)
-            # if(item != None):
-            #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            #     db.collection(name_adrress).document('point_center 2').set(data)
-            #     break    
-        # for item in direct_center:
-        #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-        #     if(item != None):
-        #         db.collection(name_adrress).document('point_center 2').set(data)
-        #         break    
+
         for item in direct_right:
             pen = QtGui.QPen(QColor(0, 0, 255), 2, QtCore.Qt.SolidLine)
             qp.setPen(pen)
             qp.drawLine(item[0], item[1])
             qp.drawText(item[0], str("right line 2"))
             line_right2=item
-            # if(item != None):
-            #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-            #     db.collection(name_adrress).document('point_right 2').set(data)
-            #     break
-        # for item in direct_right:
-        #     data={'point_begin':[item[0].x(),item[0].y()],'poin_end':[item[1].x(),item[0].y()]}
-        #     if(item != None):
-        #         db.collection(name_adrress).document('point_right 2').set(data)
-        #         break
+          
         qp.end()
     def mousePressEvent(self, event):
         self.begin = event.pos()
@@ -394,33 +252,29 @@ class DrawObject(QWidget):
         elif self.flag == 'rect':
             rect.append([self.begin, self.end])
 # for Tab Draw <--
-
-def midPoint(a, b, c, d):
-    return int(a + (c - a) / 2), int(b + (d - b) / 2)
-
-
-def shortDir(file_dir):
-    stringNum = len(file_dir)
-    if stringNum > 35:
-        file_dir = "..." + file_dir[-25:]
-    return file_dir
-
-
-class MyWindow(QMainWindow):
-    def __init__(self, parent=None):
-        super(QMainWindow, self).__init__(parent)
-        self.ui = Ui_MainWindow()
+class MainApplication(QtWidgets.QMainWindow):
+    def __init__(self):
+        QtWidgets.QMainWindow.__init__(self)
+        self.ui = Ui_App()
         self.ui.setupUi(self)
-        self.setWindowIcon(QtGui.QIcon(ICON_PATH))
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
-        self.openFileNameLabel = QLabel()
-        self.saveFolderLabel = QLabel()
-        self.fileDir = None
-        self.saveDir = None
-        self.ui.Browser.clicked.connect(self.setOpenFileName)
-        self.ui.Browser_2.clicked.connect(self.setSaveFolder)
-        # self.ui.Play.clicked.connect(self.startVideo)
-        # self.ui.Stop.clicked.connect(self.stopVideo)
+        self.setWindowFlag(QtCore.Qt.FramelessWindowHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.show()
+        # self.Login_App = Login()
+        # self.Login_App.show()
+        self.ui.pushButton.clicked.connect(lambda : self.functionLogin())
+        self.ui.CloseBtn.clicked.connect(self.close)
+        self.ui.MinimunBtn.clicked.connect(self.showMinimized)
+        # self.ui.logoutButton.clicked.connect(lambda: self.functionLogout())
+        self.ui.Showpassword.clicked.connect(lambda: self.showPass())
+        self.ui.Hidepassword.clicked.connect(lambda: self.hidePass())
+        self.ui.stackedWidget.setCurrentIndex(0)
+        self.ui.logout_btn.clicked.connect(lambda: self.functionLogout())
+        # self.ui.home_btn_2.setChecked(True)
+        self.ui.openaddcam_btn.clicked.connect(lambda: self.functionOpenaddcamera())
+        # self.id =[]
+        self.ui.addcam_btn.clicked.connect(lambda: self.functionAddcamera())
+        self.ui.preview_btn.clicked.connect(lambda: self.functionPreviewcamera())
         self.ui.Line_left.clicked.connect(self.setLeftLane)
         self.ui.Line_Center.clicked.connect(self.setCenterLane)
         self.ui.Line_Right.clicked.connect(self.setRightLane)
@@ -430,154 +284,315 @@ class MyWindow(QMainWindow):
         self.ui.Square.clicked.connect(self.setRect)
         self.ui.Delete.clicked.connect(self.GoBack)
         self.ui.Save_draw.clicked.connect(self.Updatefirebase)
-        # self.ui.Save_video.clicked.connect(self.exportVideo)
-        # self.ui.Table.itemDoubleClicked.connect(self.openImage)
-        self.ui.Table.setColumnWidth(0, 300)
-        self.ui.Table.setColumnWidth(1, 100)
-        self.ui.Close.clicked.connect(self.close)
-        self.ui.Minimun.clicked.connect(self.showMinimized)
-        self.capture_thread = None
-        self.saving_thread = None
-        self.stop = True
-        self.begin = QPoint()
-        self.end = QPoint()
-        self.previous = {}
-        self.current = {}
-        self.counter = {}
-        self.mapping = {}
-        self.violation = []
-        self.k_counter = None
-        self.t_counter1 = []
-        self.t_counter2 = []
-        self.t_counter3 = []
-        self.t_counter4 = []
-        self.t_counter5 = []
-        self.t_counter6 = []
-        self.v_counter = []
-        self.w_counter = []
-        self.current_time = 0
-        self.screen = self.ui.Camera_view.frameSize().height()
-        self.ui.Camera_view = CameraView(self.ui.Camera_view)
         self.ui.Draw_line = DrawObject(self.ui.Draw_line)
-
-
+        self.list_item_widgets =[] 
+        
+        self.screen = 720
+        self.getlistitemcam_from_firbase()
+        violationlistinformation = db.collection('violation').get()
+        for a in violationlistinformation:
+            self.violationinfor = QtWidgets.QWidget()
+            self.violationinfor.setGeometry(QtCore.QRect(130, 60, 950, 80))
+            self.violationinfor.setStyleSheet("background-color: rgb(255, 0, 0);\n"
+    "border-radius:20px\n"
+    "")
+            self.violationinfor.setObjectName("violationinfor")
+            self.licenseplate = QtWidgets.QLabel(self.violationinfor)
+            self.licenseplate.setGeometry(QtCore.QRect(100, 15, 90, 16))
+            self.licenseplate.setStyleSheet("color: rgb(255, 255, 255);")
+            self.licenseplate.setObjectName("licenseplate")
+            licensePlate = db.collection('violation').document(a.id).get().get("licenseplate")
+            self.licenseplate.setText(licensePlate)
+            self.downloadvideoviolation = QtWidgets.QPushButton(self.violationinfor)
+            self.downloadvideoviolation.setGeometry(QtCore.QRect(710, 25, 93, 30))
+            self.downloadvideoviolation.setText("")
+            icon = QtGui.QIcon()
+            icon.addPixmap(QtGui.QPixmap("C:/Users/xuanp/Downloads/icons8-downloading-updates-24.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+            self.downloadvideoviolation.setIcon(icon)
+            self.downloadvideoviolation.setObjectName("downloadvideoviolation")
+            self.label_liscense = QtWidgets.QLabel(self.violationinfor)
+            self.label_liscense.setGeometry(QtCore.QRect(10, 15, 70, 16))
+            self.label_liscense.setStyleSheet("color: rgb(255, 255, 255);")
+            self.label_liscense.setObjectName("label_liscense")
+            self.label_violation = QtWidgets.QLabel(self.violationinfor)
+            self.label_violation.setGeometry(QtCore.QRect(10, 45, 70, 16))
+            self.label_violation.setStyleSheet("color: rgb(255, 255, 255);")
+            self.label_violation.setObjectName("label_violation")
+            self.violationoflicense = QtWidgets.QLabel(self.violationinfor)
+            self.violationoflicense.setGeometry(QtCore.QRect(100, 45, 91, 16))
+            self.violationoflicense.setStyleSheet("color: rgb(255, 255, 255);")
+            self.violationoflicense.setObjectName("violationoflicense")
+            violationinforlicenseplate = db.collection('violation').document(a.id).get().get("violation")
+            self.violationoflicense.setText(violationinforlicenseplate)
+            self.label_timestamp = QtWidgets.QLabel(self.violationinfor)
+            self.label_timestamp.setGeometry(QtCore.QRect(220, 15, 70, 16))
+            self.label_timestamp.setStyleSheet("color: rgb(255, 255, 255);")
+            self.label_timestamp.setObjectName("label_timestamp")
+            self.timestamp = QtWidgets.QLabel(self.violationinfor)
+            self.timestamp.setGeometry(QtCore.QRect(300, 15, 145, 16))
+            self.timestamp.setStyleSheet("color: rgb(255, 255, 255);")
+            self.timestamp.setObjectName("timestamp")
+            timeStamp = db.collection('violation').document(a.id).get().get("time")
+            self.timestamp.setText("12:20:43 01/01/2023")
+            self.label_local = QtWidgets.QLabel(self.violationinfor)
+            self.label_local.setGeometry(QtCore.QRect(220, 45, 70, 16))
+            self.label_local.setStyleSheet("color: rgb(255, 255, 255);")
+            self.label_local.setObjectName("label_local")
+            self.location = QtWidgets.QLabel(self.violationinfor)
+            self.location.setGeometry(QtCore.QRect(300, 45, 145, 16))
+            self.location.setStyleSheet("color: rgb(255, 255, 255);")
+            self.location.setObjectName("location")
+            locaTion = db.collection('violation').document(a.id).get().get("local")
+            self.location.setText(locaTion)
+            self.item = QListWidgetItem()
+            self.item.setSizeHint(QSize(200,100))
+            self.ui.listviolation.addItem(self.item)
+            self.ui.listviolation.setItemWidget(self.item,self.violationinfor)
+            self.id = a.id
+            self.list_item_widgets.append((self.item,self.violationinfor,self.downloadvideoviolation,self.id))
+            self.label_liscense.setText("Biến số xe:")
+            self.label_violation.setText("Lỗi vi phạm:")
+            self.label_timestamp.setText( "Thời gian :")
+            self.label_local.setText( "Địa điểm :")
+            self.violationinfor.installEventFilter(self)
+        #video violation
+        #user page
+    ## Function for searching
+    # def on_search_btn_clicked(self):
+    #     self.ui.stackedWidget.setCurrentIndex(5)
+    #     search_text = self.ui.search_input.text().strip()
+    #     if search_text:
+    #         self.ui.label_9.setText(search_text)
+    def getlistitemcam_from_firbase(self):
+        self.list_item_cam=[]
+        listcam_setup = db.collection('cameraIp').get()
+        try:
+            for camera in listcam_setup:
+                self.label_namecamonlist = QtWidgets.QPushButton()
+                name_cam = db.collection('cameraIp').document(camera.id).get().get('namecam')
+                self.label_namecamonlist.setText(name_cam)
+                self.label_namecamonlist.setStyleSheet(
+                    "background-color:#ffffff;\n"
+        "border-radius:20px;\n"
+        "border:none\n"
+                )
+                self.item_addcam = QListWidgetItem()
+                self.item_addcam.setSizeHint(QSize(150,40))
+                self.ui.listWidget_addcam.addItem(self.item_addcam)
+                self.urlgetcam = db.collection('cameraIp').document(camera.id).get().get('Ipcamera')
+                self.ui.listWidget_addcam.setItemWidget(self.item_addcam,self.label_namecamonlist)
+                self.ui.listWidget_addcam.installEventFilter(self)
+                self.camid = camera.id
+                self.list_item_cam.append((self.item_addcam,self.label_namecamonlist,self.urlgetcam,self.camid))
+                self.label_namecamonlist.installEventFilter(self)
+                # try:
+                #     item0_laneleft = db.collection('cameraIp').document(camera.id).get().get('point_left1_begin')
+                #     item1_laneleft = db.collection('cameraIp').document(camera.id).get().get('point_left1_end')
+                #     self.begin = QPoint(item0_laneleft[0],item0_laneleft[1])
+                #     self.end = QPoint(item1_laneleft[0],item1_laneleft[1])
+                #     pen = QtGui.QPen(QColor(255, 0, 0), 2, QtCore.Qt.SolidLine)
+                #     qp.setPen(pen)
+                #     qp.drawLine(self.begin, self.end)
+                #     qp.drawText(self.begin, str("line left 1"))
+                # except:
+                #     print(1)
+        except:
+            print(1)
+    ## Function for changing page to user page
+    def on_user_btn_clicked(self):
+        self.ui.stackedWidget.setCurrentIndex(5)
+      
+    ## Change QPushButton Checkable status when stackedWidget index changed
+    def on_stackedWidget_currentChanged(self, index):
+        btn_list = self.ui.full_menu_widget.findChildren(QPushButton)
+        for btn in btn_list:
+            if index in [5, 6]:
+                btn.setAutoExclusive(False)
+                btn.setChecked(False)
+            else:
+                btn.setAutoExclusive(True)
+    
+    ## functions for changing menu page
+    # def on_home_btn_2_toggled(self):
+    #     self.ui.stackedWidget.setCurrentIndex(0)
+    def on_dashborad_btn_2_toggled(self):
+        self.ui.stackedWidget.setCurrentIndex(1)
+    def on_listcam_btn_menu_toggled(self):
+        self.ui.stackedWidget.setCurrentIndex(2)
+    def on_videoviolation_btn_menu_toggled(self):
+        self.ui.stackedWidget.setCurrentIndex(3)         
+    # def get_list_camera(self):
+    def on_statistic_btn_menu_toggled(self):
+        self.ui.stackedWidget.setCurrentIndex(4)
+    #login
+    def functionLogin(self):
+        global mail
+        Email=''
+        page = auth.list_users()
+        while page:
+            for user in page.users:
+                if(self.ui.Email.text() == user.email):
+                    #print(user.email)
+                    Email = user.email
+                    self.mail = Email
+                    break
+            page=page.get_next_page()
+        passwords=''
+        if(not Email):
+            print('error')
+        else:
+            passwords = db.collection('account').document(Email).get().get("pass")
+            if(passwords == self.ui.password.text()):
+                self.ui.widget.hide()
+                self.ui.centralapp.show()
+                name = db.collection('account').document(Email).get().get("name")
+                self.ui.nameInfor.setText(name)
+                print("login successful")
+                #user page
+                nameuser = db.collection('account').document(self.mail).get().get("name")
+                dateofbirth = db.collection('account').document(self.mail).get().get("dateofbirth")
+                nphone = db.collection('account').document(self.mail).get().get("nphone")
+                emailuser = db.collection('account').document(self.mail).get().get("email")
+                self.ui.nameuser.setText(nameuser)
+                self.ui.nametxt.setText(nameuser)
+                self.ui.datetxt.setText(dateofbirth)
+                self.ui.nphonetxt.setText(nphone)
+                self.ui.emailtxt.setText(emailuser)
+    def showPass(self):
+        self.ui.Hidepassword.show()
+        self.ui.Showpassword.hide()
+        self.ui.password.setEchoMode(QtWidgets.QLineEdit.Normal)        
+    def hidePass(self):
+        self.ui.Hidepassword.hide()
+        self.ui.Showpassword.show()
+        self.ui.password.setEchoMode(QtWidgets.QLineEdit.Password)
+    def functionLogout(self):
+        self.ui.centralapp.hide()
+        self.ui.widget.show()
+    def eventFilter(self,obj,event):
+        pointer_to_widget = obj
+        if event.type() == QEvent.MouseButtonPress:
+            for i in self.list_item_widgets:
+                i[2].hide()
+        if event.type() == QEvent.MouseButtonPress:
+            for i in self.list_item_widgets:
+                if pointer_to_widget == i[1]:
+                    i[2].show()
+                    vidid =i[3]
+                    i[2].clicked.connect(lambda: self.download(vidid))
+            for i in self.list_item_cam:
+                if pointer_to_widget == i[1]:
+                    self.ui.widget_setupcam.show()
+                    link_cameraIp = str(i[2])
+                    retval, img = getFrame(link_cameraIp, 1)
+                    qImg = QtImage(self.screen, img)
+                    self.ui.Draw_line.setImage(qImg)
+                    self.id_camsetup = i[3]
+                    cam_id = i[3]
+                    # self.ui.removecam_btn.clicked.connet(lambda: self.functionremovecam(cam_id))
+        return super(MainApplication,self).eventFilter(obj,event)
+    # def funtionremovecam(self,id):
+    #     db.collection('cameraIp').docment(id).delete()
+    #     self.ui.listWidget_addcam.remove
+    #     self.getlistitemcam_from_firbase()
+    def download(self,id):
+        licensePlate = db.collection('violation').document(id).get().get("licenseplate")
+        violationinforlicenseplate = db.collection('violation').document(id).get().get("violation")
+        timeStamp = db.collection('violation').document(id).get().get("time")
+        locaTion = db.collection('violation').document(id).get().get("local")
+        store.child("/"+id+".mp4").download(id+".mp4",licensePlate +"_"+locaTion+".mp4")
+    def functionOpenaddcamera(self):
+        self.ui.widget_addcam.show()
+        self.ui.widget_setupcam.hide()
+    def functionAddcamera(self):
+        self.label_namecamonlist = QtWidgets.QPushButton()
+        self.label_namecamonlist.setText(self.ui.namecam_inout.text())
+        self.label_namecamonlist.setStyleSheet(
+            "background-color:#ffffff;\n"
+"border-radius:20px;\n"
+"border:none\n"
+        )
+        self.item_addcam = QListWidgetItem()
+        self.item_addcam.setSizeHint(QSize(150,40))
+        self.ui.listWidget_addcam.addItem(self.item_addcam)
+        self.urlgetcam = self.ui.linkcam_input.text()
+        self.ui.listWidget_addcam.setItemWidget(self.item_addcam,self.label_namecamonlist)
+        self.ui.listWidget_addcam.installEventFilter(self)
+        data ={"Ipcamera":str(self.ui.linkcam_input.text()),"namecam":str(self.ui.namecam_inout.text()),"district":str(self.ui.district_input.text()),"ward":self.ui.wards_input.text()}
+        update_time, id_onfirebase=db.collection("cameraIp").add(data)
+        self.list_item_cam.append((self.item_addcam,self.label_namecamonlist,self.urlgetcam,id_onfirebase.id))
+        self.label_namecamonlist.installEventFilter(self)
+        
+    def functionPreviewcamera(self):
+        try:
+            video_stream_widget = VideoStreamWidget(self.ui.linkcam_input.text())
+            while True:
+                try:
+                    video_stream_widget.show_frame()
+                except AttributeError:
+                    pass
+        except:
+            print("link camera empty")
     def Updatefirebase(self):
-        docs = db.collection(name_adrress).get()
-        for doc in docs:
-            key = doc.id
-            db.collection(name_adrress).document(key).delete()
         try:
-            data={'point_begin':[line_left1[0].x(),line_left1[0].y()],'point_end':[line_left1[1].x(),line_left1[1].y()]}
-            db.collection(name_adrress).document('point_left 1').set(data)
+            data={'point_left1_begin':[line_left1[0].x(),line_left1[0].y()],'point_left1_end':[line_left1[1].x(),line_left1[1].y()]}
+            db.collection("cameraIp").document(self.id_camsetup).update(data)
         except:
             print(1)
         try:
-            data={'point_begin':[line_left2[0].x(),line_left2[0].y()],'point_end':[line_left2[1].x(),line_left2[1].y()]}
-            db.collection(name_adrress).document('point_left 2').set(data)
+            data={'point_left2_begin':[line_left2[0].x(),line_left2[0].y()],'point_left2_end':[line_left2[1].x(),line_left2[1].y()]}
+            db.collection("cameraIp").document(self.id_camsetup).update(data)
         except:
             print(1)
         try:
-            data={'point_begin':[line_center1[0].x(),line_center1[0].y()],'point_end':[line_center1[1].x(),line_center1[1].y()]}
-            db.collection(name_adrress).document('point_center 1').set(data)
+            data={'point_center1_begin':[line_center1[0].x(),line_center1[0].y()],'point_center1_end':[line_center1[1].x(),line_center1[1].y()]}
+            db.collection("cameraIp").document(self.id_camsetup).update(data)
         except:
             print(1)
         try:
-            data={'point_begin':[line_center2[0].x(),line_center2[0].y()],'point_end':[line_center2[1].x(),line_center2[1].y()]}
-            db.collection(name_adrress).document('point_center 2').set(data)
+            data={'point_center2_begin':[line_center2[0].x(),line_center2[0].y()],'point_center2_end':[line_center2[1].x(),line_center2[1].y()]}
+            db.collection("cameraIp").document(self.id_camsetup).update(data)
         except:
             print(1)
         try:
-            data={'point_begin':[line_right1[0].x(),line_right1[0].y()],'point_end':[line_right1[1].x(),line_right1[1].y()]}
-            db.collection(name_adrress).document('point_right 1').set(data)
+            data={'point_right1_begin':[line_right1[0].x(),line_right1[0].y()],'point_right1_end':[line_right1[1].x(),line_right1[1].y()]}
+            db.collection("cameraIp").document(self.id_camsetup).update(data)
         except:
             print(1)
         try:
-            data={'point_begin':[line_right2[0].x(),line_right2[0].y()],'point_end':[line_right2[1].x(),line_right2[1].y()]}
-            db.collection(name_adrress).document('point_right 2').set(data)
+            data={'point_right2_begin':[line_right2[0].x(),line_right2[0].y()],'point_right2_end':[line_right2[1].x(),line_right2[1].y()]}
+            db.collection("cameraIp").document(self.id_camsetup).update(data)
         except:
             print(1)
-        data={'show_detected_label':self.ui.ShowLabel.isChecked(),
-        'showing_detected_box':self.ui.ShowBox.isChecked(),
-        'save_image_of_the_vehicle':self.ui.SaveImage.isChecked(),
-        'save_video_of_the_vehicle':self.ui.SaveVideo.isChecked()
-        }
+        try:
+            data={'point_rect1_begin':[rect_redlight[0].x(),rect_redlight[0].y()],'point_rect1_end':[rect_redlight[1].x(),rect_redlight[1].y()]}
+            db.collection("cameraIp").document(self.id_camsetup).update(data)
+        except:
+            print(1)
         left_laneSettings ={
-            'turn_left':self.ui.turn_left_left_lane.isChecked(),
-            'turn_right':self.ui.turn_right_left_lane.isChecked(),
-            'go_forward':self.ui.go_forward_left_lane.isChecked(),
-            'red_light':self.ui.red_light_left.isChecked()
+            'turn_left_leftlane':self.ui.turn_left_left_lane.isChecked(),
+            'turn_right_leftlane':self.ui.turn_right_left_lane.isChecked(),
+            'go_forward_leftlane':self.ui.go_forward_left_lane.isChecked(),
+            'red_light_leftlane':self.ui.red_light_left.isChecked()
         }
         right_laneSettings ={
-            'turn_left':self.ui.turn_right_right_lane.isChecked(),
-            'turn_right':self.ui.turn_right_right_lane.isChecked(),
-            'go_forward':self.ui.go_forward_right_lane.isChecked(),
-            'red_light':self.ui.red_light_right.isChecked()
+            'turn_left_rightlane':self.ui.turn_right_right_lane.isChecked(),
+            'turn_right_rightlane':self.ui.turn_right_right_lane.isChecked(),
+            'go_forward_rightlane':self.ui.go_forward_right_lane.isChecked(),
+            'red_light_rightlane':self.ui.red_light_right.isChecked()
         }
         center_laneSettings ={
-            'turn_left':self.ui.turn_left_center_lane.isChecked(),
-            'turn_right':self.ui.turn_right_center_lane.isChecked(),
-            'go_forward':self.ui.go_forwar_center_lane.isChecked(),
-            'red_light':self.ui.red_light_center.isChecked()
+            'turn_left_centerlane':self.ui.turn_left_center_lane.isChecked(),
+            'turn_right_centerlane':self.ui.turn_right_center_lane.isChecked(),
+            'go_forward_centerlane':self.ui.go_forwar_center_lane.isChecked(),
+            'red_light_centerlane':self.ui.red_light_center.isChecked()
         }
-        db.collection(name_adrress).document('Settings_Display').set(data)
-        db.collection(name_adrress).document('left_laneSettings').set(left_laneSettings)
-        db.collection(name_adrress).document('right_laneSettings').set(right_laneSettings)
-        db.collection(name_adrress).document('center_laneSettings').set(center_laneSettings)
+        db.collection("cameraIp").document(self.id_camsetup).update(left_laneSettings)
+        db.collection("cameraIp").document(self.id_camsetup).update(right_laneSettings)
+        db.collection("cameraIp").document(self.id_camsetup).update(center_laneSettings)
 
 
-
-        # if(line_left2 != None):
-        #     data={'point_begin':[line_left2[0].x(),line_left2[0].y()],'poin_end':[line_left2[1].x(),line_left2[0].y()]}
-        #     db.collection(name_adrress).document('point_left 2').set(data)
-        # if(line_center1 != None):
-        #     data={'point_begin':[line_center1[0].x(),line_center1[0].y()],'poin_end':[line_center1[1].x(),line_center1[0].y()]}
-        #     db.collection(name_adrress).document('point_center 1').set(data)
-        # if(line_center2 != None):
-        #     data={'point_begin':[line_center2[0].x(),line_center2[0].y()],'poin_end':[line_center2[1].x(),line_center2[0].y()]}
-        #     db.collection(name_adrress).document('point_center 2').set(data)
-        # if(line_right1 != None):
-        #     data={'point_begin':[line_right1[0].x(),line_right1[0].y()],'poin_end':[line_right1[1].x(),line_right1[0].y()]}
-        #     db.collection(name_adrress).document('point_right 1').set(data)
-        # if(line_right2 != None):
-        #     data={'point_begin':[line_right2[0].x(),line_right2[0].y()],'poin_end':[line_right2[1].x(),line_right2[0].y()]}
-        #     db.collection(name_adrress).document('point_right 2').set(data)
-
-
-    def setOpenFileName(self):
-        self.fileDir, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open video", self.openFileNameLabel.text(),
-            "Videos (*.mp4)"
-        )
-        #get name file
-        a = self.fileDir.split('/')
-        global name_adrress
-        name_adrress = a[len(a)-1][:-4]
-        print(name_adrress)
-        if self.fileDir:
-            fileName = shortDir(self.fileDir)
-            self.ui.Filename.setText(fileName)
-            retval, img = getFrame(self.fileDir, 5)
-            qImg = QtImage(self.screen, img)
-            self.ui.Draw_line.setImage(qImg)
-            self.saveDir = os.path.dirname(self.fileDir)
-            self.ui.Filename_2.setText(self.saveDir)
-            self.showSaveDir()
-
-    def setSaveFolder(self):
-        self.saveDir = QFileDialog.getExistingDirectory(self, 'Select Folder')
-        if self.saveDir:
-            self.showSaveDir()
-
-    def showSaveDir(self):
-        folderName = self.saveDir
-        folderName = shortDir(folderName)
-        self.ui.Filename_2.setText(folderName)
-        Saving_info = "Images will be saved as: <font color='green'> {} </font> <br>" \
-                      "Videos will be saved as: <font color='green'> {} </font>".format(folderName + "/Images",
-                                                                                        folderName + "/Videos")
-        self.ui.Result_dir.setText(Saving_info)
-    #set mode draw
+    #updat mode draw
     def setLeftLane(self):
         self.ui.Draw_line.setMode("lane", "left")
 
@@ -602,211 +617,8 @@ class MyWindow(QMainWindow):
     def GoBack(self):
         self.ui.Draw_line.goBack()
 
-    def savingVideo(self):
-        index = (self.ui.Table.selectionModel().currentIndex())
-        keys = list(self.mapping.keys())
-        file = 'Videos/{}.mp4'.format(keys[index.row()])
-        file_dir = os.path.join(self.saveDir, file)
-        clip = VideoFileClip(self.fileDir)
-        start, end = self.mapping[keys[index.row()]]
-        clip = clip.subclip(start, end)
-        clip.write_videofile(file_dir, audio=False, verbose=False, logger=None)
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    w = MainApplication()
+    sys.exit(app.exec_())
 
-    def updateTable(self, file_name):
-        if self.current_time - 2 > 0:
-            start = self.current_time - 2
-        else:
-            start = 0
-        end = self.current_time + 2
-        self.mapping[file_name] = [start, end]
-        num_cols = 1
-        num_rows = len(self.mapping.keys())
-        self.ui.Table.setColumnCount(num_cols)
-        self.ui.Table.setRowCount(num_rows)
-        idx = 0
-        for key, value in self.mapping.items():
-            self.ui.Table.setItem(idx, 0, QTableWidgetItem('{}.jpg'.format(key)))
-            idx += 1
-
-    def updateWrongLane(self, img, x0, y0, violation, track_id, time_stamp):
-        self.w_counter.append(track_id)
-        self.ui.Vcounter_2.setText(str(len(list(set(self.w_counter)))))
-        cv2.rectangle(img, (x0, y0 - 10), (x0 + 10, y0), (255, 0, 0), -1)
-        file_name = "{}_{}".format(violation, time_stamp)
-        if self.ui.SaveImage.isChecked():
-            cv2.imwrite("{}/Images/{}.jpg"
-                        .format(self.saveDir, file_name), img)
-            self.ui.Violation_name.setText(file_name)
-            if self.ui.SaveVideo.isChecked():
-                self.updateTable(file_name)
-
-    def updateCrossLight(self, img, x0, y0, track_id, time_stamp):
-        self.v_counter.append(track_id)
-        self.ui.Vcounter.setText(str(len(list(set(self.v_counter)))))
-        cv2.rectangle(img, (x0, y0 - 10), (x0 + 10, y0), (0, 0, 255), -1)
-        file_name = "vuot_den_{}".format(time_stamp)
-        if self.ui.SaveImage.isChecked():
-            cv2.imwrite("{}/Images/{}.jpg"
-                        .format(self.saveDir, file_name), img)
-            self.ui.Violation_name.setText(file_name)
-            if self.ui.SaveVideo.isChecked():
-                self.updateTable(file_name)
-
-
-    def update(self):
-        """global vertical
-        cap = cv2.VideoCapture(self.fileDir)
-        while cap.isOpened():
-            if self.stop is True or not cap.isOpened():
-                self.stop = True
-                break
-            ret, img = cap.read()
-            img_height, img_width, img_colors = img.shape
-            scale = self.screen / img_height
-            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            current_color = colorDetector(img, rect)
-            WRONG_LANE_X_SIGN = current_color
-            current_frame = cap.get(1)
-            fps = cap.get(5)
-            self.current_time = int(current_frame / fps)
-            time_stamp = datetime.now().strftime('%Y_%m_%d-%H_%M_%S')
-            box_detects, scores, classes = Detect(detector, img)
-            ind = [i for i, item in enumerate(classes) if item == 0]
-            classes = np.delete(classes, ind)
-            box_detects = np.delete(box_detects, ind, axis=0)
-            scores = np.delete(scores, ind)
-            data_track = tracker.update(box_detects, scores, classes)
-            labels = detector.names
-
-            for i in range(len(data_track)):
-                box = data_track[i][:4]
-                track_id = int(data_track[i][4])
-                cls_id = int(data_track[i][5])
-                x0 = int(box[0])
-                y0 = int(box[1])
-                x1 = int(box[2])
-                y1 = int(box[3])
-                self.current[track_id] = midPoint(x0, y0, x1, y1)
-                color = (_COLORS[track_id % 30] * 255).astype(np.uint8).tolist()
-                text = labels[cls_id] + "_" + str(track_id)
-                txt_color = (0, 0, 0) if np.mean(_COLORS[track_id % 30]) > 0.5 else (255, 255, 255)
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                txt_size = cv2.getTextSize(text, font, 0.4, 1)[0]
-                txt_bk_color = (_COLORS[track_id % 30] * 255 * 0.7).astype(np.uint8).tolist()
-                if self.ui.ShowLabel.isChecked():
-                    cv2.rectangle(img, (x0, y0 + 1), (x0 + txt_size[0] + 1, y0 + int(1.5 * txt_size[1])), txt_bk_color, -1)
-                    cv2.putText(img, text, (x0, y0 + txt_size[1]), font, 0.4, txt_color, thickness=1)
-                if self.ui.ShowBox.isChecked():
-                    cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
-                if track_id in self.previous:
-                    cv2.line(img, self.previous[track_id], self.current[track_id], color, 1)
-                    line_group0 = [lane_left, lane_center, lane_right]
-                    for element in line_group0:
-                        if len(element) > 0:
-                            start_line = element[0][0].x(), element[0][0].y()
-                            end_line = element[0][1].x(), element[0][1].y()
-                            if intersect(self.previous[track_id], self.current[track_id], start_line, end_line):
-                                if line_group0.index(element) == 0:
-                                    self.t_counter1.append(track_id)
-                                    if current_color == BLOW_THE_X_SIGN and not self.ui.red_light_left.isChecked():
-                                        self.updateCrossLight(img, x0, y0, track_id, time_stamp)
-                                elif line_group0.index(element) == 1:
-                                    self.t_counter2.append(track_id)
-                                    if current_color == BLOW_THE_X_SIGN and not self.ui.red_light_center.isChecked():
-                                        self.updateCrossLight(img, x0, y0, track_id, time_stamp)
-                                elif line_group0.index(element) == 2:
-                                    self.t_counter3.append(track_id)
-                                    if current_color == BLOW_THE_X_SIGN and not self.ui.red_light_right.isChecked():
-                                        self.updateCrossLight(img, x0, y0, track_id, time_stamp)
-
-                    '''
-                    t_counter1: line 1
-                    t_counter2: line 2
-                    t_counter3: line 3
-                    t_counter4: line 4
-                    t_counter5: line 5
-                    t_counter6: line 6
-                    '''
-                    line_group1 = [direct_left, direct_center, direct_right]
-                    for element in line_group1:
-                        if len(element) > 0:
-                            start_line = element[0][0].x(), element[0][0].y()
-                            end_line = element[0][1].x(), element[0][1].y()
-                            if intersect(self.previous[track_id], self.current[track_id], start_line, end_line):
-
-                                '''
-                                xét tại thời điểm cắt qua line 4
-                                '''
-                                if line_group1.index(element) == 0:
-                                    self.t_counter4.append(track_id)
-                                    self.ui.Tcounter_3.setText(str(len(list(set(self.t_counter4)))))
-                                    if current_color == WRONG_LANE_X_SIGN:
-                                        if track_id in self.t_counter2 and \
-                                                not self.ui.turn_left_center_lane.isChecked():
-                                            violation = "sai_lan_giua"
-                                            self.updateWrongLane(img, x0, y0, violation, track_id, time_stamp)
-
-                                        elif track_id in self.t_counter3 and \
-                                                not self.ui.turn_left_right_lane.isChecked():
-                                            violation = "sai_lan_phai"
-                                            self.updateWrongLane(img, x0, y0, violation, track_id, time_stamp)
-
-                                '''
-                                xét tại thời điểm cắt qua line 5
-                                '''
-                                if line_group1.index(element) == 1:
-                                    self.t_counter5.append(track_id)
-                                    self.ui.Tcounter_4.setText(str(len(list(set(self.t_counter5)))))
-                                    if current_color == WRONG_LANE_X_SIGN:
-                                        if track_id in self.t_counter1 and \
-                                                not self.ui.go_forward_left_lane.isChecked():
-                                            violation = "sai_lan_trai"
-                                            self.updateWrongLane(img, x0, y0, violation, track_id, time_stamp)
-                                        elif track_id in self.t_counter3 and \
-                                                not self.ui.go_forward_right_lane.isChecked():
-                                            violation = "sai_lan_phai"
-                                            self.updateWrongLane(img, x0, y0, violation, track_id, time_stamp)
-
-                                '''
-                                xét tại thời điểm cắt qua line 6
-                                '''
-                                if line_group1.index(element) == 2:
-                                    self.t_counter6.append(track_id)
-                                    self.ui.Tcounter_5.setText(str(len(list(set(self.t_counter6)))))
-                                    if current_color == WRONG_LANE_X_SIGN:
-                                        if track_id in self.t_counter1 and \
-                                                not self.ui.turn_right_left_lane.isChecked():
-                                            violation = "sai_lan_trai"
-                                            self.updateWrongLane(img, x0, y0, violation, track_id, time_stamp)
-                                        elif track_id in self.t_counter2 and \
-                                                not self.ui.turn_right_center_lane.isChecked():
-                                            violation = "sai_lan_giua"
-                                            self.updateWrongLane(img, x0, y0, violation, track_id, time_stamp)
-
-                    self.ui.Tcounter_0.setText(str(len(list(set(self.t_counter1)))))
-                    self.ui.Tcounter_1.setText(str(len(list(set(self.t_counter2)))))
-                    self.ui.Tcounter_2.setText(str(len(list(set(self.t_counter3)))))
-                self.previous[track_id] = self.current[track_id]
-            wd01 = QtImage(self.screen, img)
-            self.ui.Camera_view.setImage(wd01)
-
-    def Checking(self):
-        cap = cv2.VideoCapture(self.fileDir)
-        myFrameNumber = 5
-        totalFrames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        if myFrameNumber >= 0 & myFrameNumber <= totalFrames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, myFrameNumber)
-        while myFrameNumber < totalFrames:
-            retval, img = cap.read()
-            img_height, img_width, img_colors = img.shape
-            scale = self.screen / img_height
-            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            wd02 = QtImage(self.screen, img)
-            self.ui.Export_view.setImage(wd02)"""
-
-
-app = QApplication(sys.argv)
-w = MyWindow(None)
-w.windowTitle()
-w.show()
-app.exec_()
