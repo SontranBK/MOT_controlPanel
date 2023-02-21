@@ -307,7 +307,7 @@ class MainApplication(QtWidgets.QMainWindow):
             self.downloadvideoviolation.setGeometry(QtCore.QRect(710, 25, 93, 30))
             self.downloadvideoviolation.setText("")
             icon = QtGui.QIcon()
-            icon.addPixmap(QtGui.QPixmap("C:/Users/xuanp/Downloads/icons8-downloading-updates-24.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+            icon.addPixmap(QtGui.QPixmap("static/iconSetupcam/icons8-downloading-updates-24.png"), QtGui.QIcon.Normal, QtGui.QIcon.Off)
             self.downloadvideoviolation.setIcon(icon)
             self.downloadvideoviolation.setObjectName("downloadvideoviolation")
             self.label_liscense = QtWidgets.QLabel(self.violationinfor)
